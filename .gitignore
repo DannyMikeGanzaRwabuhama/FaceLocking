@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+src/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Project-specific
+data/
+data/enroll/          # Enrolled face images (personal data)
+data/db/              # Face database (personal data)
+data/debug_aligned/   # Debug images
+
+# Models (too large for git, download separately)
+models/
+models/*.onnx
+models/*.pb
+
+# Temporary files
+*.zip
+*.tar.gz
+buffalo_l/
+w600k_r50.onnx
+1k3d68.onnx
+2d106det.onnx
+det_10g.onnx
+genderage.onnx
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
