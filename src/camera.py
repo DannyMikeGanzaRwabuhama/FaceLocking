@@ -1,7 +1,7 @@
 import cv2
 
 def main():
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1)
     if not cap.isOpened():
         raise RuntimeError("Camera not opened. Try changing index (0/1/2).")
     print("Camera test. Press 'q' to quit.")

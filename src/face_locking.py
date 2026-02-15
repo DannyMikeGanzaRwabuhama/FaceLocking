@@ -98,6 +98,21 @@ class ActionRecord:
 # -------------------------
 # Math Helpers
 # -------------------------
+def calculate_iou(box_a: FaceDet, box_b: FaceDet) -> float:
+    """Calculate Intersection over Union (IoU) between two face boxes."""
+    xA = max(box_a.x1, box_b.x1)
+    yA = max(box_a.y1, box_b.y1)
+    xB = min(box_a.x2, box_b.x2)
+    yB = min(box_a.y2, box_b.y2)
+
+    interArea = max(0, xB - xA) * max(0, yB - yA)
+
+    boxAArea = (box_a.x2 - box_a.x1) * (box_a.y2 - box_a.y1)
+    boxBArea = (box_b.x2 - box_b.x1) * (box_b.y2 - box_b.y1)
+
+    iou = interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+    return iou
+
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     a = a.reshape(-1).astype(np.float32)
     b = b.reshape(-1).astype(np.float32)
@@ -575,19 +590,12 @@ class ActionDetector:
 
 
 # -------------------------
-# Face Locking Manager
+# Face Locking Manager (Optimized)
 # -------------------------
 class FaceLockManager:
     """
     Manages the face locking state machine.
-
-    States:
-    - UNLOCKED: No face is locked, searching for target identity
-    - LOCKED: Target identity is locked and being tracked
-
-    Lock transitions:
-    - UNLOCKED -> LOCKED: Target identity recognized with high confidence
-    - LOCKED -> UNLOCKED: Face lost for too long (>MAX_LOST_FRAMES)
+    Optimized to use spatial tracking instead of continuous recognition.
     """
 
     def __init__(self, target_identity: str):
@@ -598,21 +606,20 @@ class FaceLockManager:
         self.lock_start_time: Optional[float] = None
         self.total_lock_duration = 0.0
 
+        # Optimization: Verify identity only periodically
+        self.frames_since_verify = 0
+        self.VERIFY_INTERVAL = 30  # Run recognition every 30 frames (~1 sec)
+        self.IOU_THRESHOLD = 0.3  # Minimum overlap to assume it's the same face
+
         # Action detection
         self.action_detector = ActionDetector()
         self.history: Optional[ActionHistory] = None
 
     def try_lock(self, face: FaceDet, match_result: MatchResult) -> bool:
-        """
-        Attempt to lock onto a face if it matches the target identity.
-
-        Returns:
-            True if lock was acquired, False otherwise
-        """
+        """Attempt to lock onto a face if it matches the target identity."""
         if self.is_locked:
             return False
 
-        # Check if this is our target identity with sufficient confidence
         if (match_result.accepted and
                 match_result.name == self.target_identity and
                 match_result.similarity >= MIN_CONFIDENCE_TO_LOCK):
@@ -620,6 +627,7 @@ class FaceLockManager:
             self.locked_face = face
             self.lost_frame_count = 0
             self.lock_start_time = time.time()
+            self.frames_since_verify = 0  # Reset counter
 
             # Initialize action history
             self.history = ActionHistory(self.target_identity)
@@ -628,11 +636,6 @@ class FaceLockManager:
                 f"Locked onto {self.target_identity} (confidence={match_result.similarity:.3f})",
                 match_result.similarity
             )
-
-            print(f"\n🔒 LOCKED onto: {self.target_identity}")
-            print(f"   Confidence: {match_result.similarity:.3f}")
-            print(f"   Time: {datetime.now().strftime('%H:%M:%S')}\n")
-
             return True
 
         return False
@@ -640,100 +643,103 @@ class FaceLockManager:
     def update_lock(self, faces: List[FaceDet], embedder: ArcFaceEmbedderONNX,
                     matcher: FaceDBMatcher, frame: np.ndarray) -> Optional[FaceDet]:
         """
-        Update lock state based on current frame.
-
-        Returns:
-            The locked face if lock is maintained, None otherwise
+        Update lock state using efficient spatial tracking.
+        Only runs heavy recognition every VERIFY_INTERVAL frames.
         """
-        if not self.is_locked:
+        if not self.is_locked or not self.locked_face:
             return None
 
-        # Try to find the target identity in current faces
-        target_face = None
-        best_similarity = 0.0
+        # 1. SPATIAL TRACKING
+        # Find the face in the current frame that overlaps most with our locked face
+        best_face = None
+        best_iou = 0.0
 
         for face in faces:
-            # Get embedding and match
-            aligned, _ = align_face_5pt(frame, face.kps, out_size=(112, 112))
+            iou = calculate_iou(self.locked_face, face)
+            if iou > best_iou:
+                best_iou = iou
+                best_face = face
+
+        # 2. DECISION LOGIC
+        # Case A: We found a spatially matching face
+        if best_face and best_iou > self.IOU_THRESHOLD:
+            self.frames_since_verify += 1
+
+            # If we are within the "trust interval", skip recognition!
+            if self.frames_since_verify < self.VERIFY_INTERVAL:
+                self.locked_face = best_face
+                self.lost_frame_count = 0
+
+                # Still run lightweight action detection
+                if self.history:
+                    self.action_detector.detect_movement(best_face, self.history)
+                    self.action_detector.detect_blink(best_face.kps, self.history)
+                    self.action_detector.detect_smile(best_face.kps, self.history)
+
+                return best_face
+
+            # Case B: Time to verify identity (periodic check)
+            # This only happens once every ~30 frames
+            aligned, _ = align_face_5pt(frame, best_face.kps, out_size=(112, 112))
             emb = embedder.embed(aligned)
             match_result = matcher.match(emb)
 
-            # Check if this is our target
-            if (match_result.name == self.target_identity and
-                    match_result.similarity > best_similarity):
-                target_face = face
-                best_similarity = match_result.similarity
+            if match_result.name == self.target_identity:
+                # Verified! Reset counter
+                self.frames_since_verify = 0
+                self.locked_face = best_face
+                self.lost_frame_count = 0
 
-        if target_face is not None:
-            # Found target - maintain lock
-            self.locked_face = target_face
-            self.lost_frame_count = 0
+                # Action detection
+                if self.history:
+                    self.action_detector.detect_movement(best_face, self.history)
+                    self.action_detector.detect_blink(best_face.kps, self.history)
+                    self.action_detector.detect_smile(best_face.kps, self.history)
+                return best_face
+            else:
+                # Spatial match found, but identity check failed (wrong person?)
+                # Treat as lost frame to be safe
+                pass
 
-            # Detect actions while locked
-            if self.history is not None:
-                self.action_detector.detect_movement(target_face, self.history)
-                self.action_detector.detect_blink(target_face.kps, self.history)
-                self.action_detector.detect_smile(target_face.kps, self.history)
+        # 3. FAILURE HANDLING
+        # If we reach here, we either didn't find a spatial match OR verification failed
+        self.lost_frame_count += 1
 
-            return target_face
-        else:
-            # Target not found - increment lost counter
-            self.lost_frame_count += 1
+        if self.lost_frame_count > MAX_LOST_FRAMES:
+            self.release_lock()
+            return None
 
-            # Release lock if lost for too long
-            if self.lost_frame_count > MAX_LOST_FRAMES:
-                self.release_lock()
-                return None
-
-            # Maintain lock (tolerance for brief failures)
-            return self.locked_face
+        # Return the OLD face position so the box doesn't disappear immediately during blips
+        return self.locked_face
 
     def release_lock(self, manual: bool = False) -> None:
         """Release the current lock and save history"""
         if not self.is_locked:
             return
 
-        # Calculate lock duration
-        if self.lock_start_time is not None:
-            duration = time.time() - self.lock_start_time
-            self.total_lock_duration += duration
+        duration = time.time() - self.lock_start_time if self.lock_start_time else 0.0
+        self.total_lock_duration += duration
 
-        # Log release
         if self.history is not None:
             reason = "Manual release" if manual else f"Face lost for {self.lost_frame_count} frames"
-            self.history.log_action(
-                "lock_released",
-                reason,
-                self.lost_frame_count
-            )
-
-            # Save history to file
+            self.history.log_action("lock_released", reason, self.lost_frame_count)
             self.history.save_to_file()
 
-        print(f"\n🔓 UNLOCKED: {self.target_identity}")
-        print(f"   Duration: {duration:.2f}s" if self.lock_start_time else "")
-        print(f"   Actions recorded: {len(self.history.records) if self.history else 0}\n")
+        print(f"\n🔓 UNLOCKED: {self.target_identity} (Duration: {duration:.2f}s)\n")
 
-        # Reset state
         self.is_locked = False
         self.locked_face = None
         self.lost_frame_count = 0
         self.lock_start_time = None
         self.history = None
-        self.action_detector = ActionDetector()  # Reset detector state
+        self.action_detector = ActionDetector()
 
     def get_lock_info(self) -> Dict:
         """Get current lock status information"""
         if not self.is_locked:
-            return {
-                "locked": False,
-                "target": self.target_identity,
-                "duration": 0.0,
-                "actions": 0
-            }
+            return {"locked": False, "target": self.target_identity, "duration": 0.0, "actions": 0}
 
         duration = time.time() - self.lock_start_time if self.lock_start_time else 0.0
-
         return {
             "locked": True,
             "target": self.target_identity,
@@ -950,7 +956,7 @@ def main():
     lock_manager = FaceLockManager(target_identity=target_identity)  # Use prompted name
 
     # Open camera
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1)
     if not cap.isOpened():
         raise RuntimeError("Camera not available")
 
@@ -983,30 +989,46 @@ def main():
 
                     # Draw other faces as unlocked
                     for face in faces:
-                        # Skip the locked face
-                        if (face.x1 == locked_face.x1 and face.y1 == locked_face.y1 and
-                                face.x2 == locked_face.x2 and face.y2 == locked_face.y2):
+                        # Skip the locked face (compare positions with tolerance)
+                        if (abs(face.x1 - locked_face.x1) < 5 and
+                                abs(face.y1 - locked_face.y1) < 5 and
+                                abs(face.x2 - locked_face.x2) < 5 and
+                                abs(face.y2 - locked_face.y2) < 5):
                             continue
 
                         aligned, _ = align_face_5pt(frame, face.kps, out_size=(112, 112))
                         emb = embedder.embed(aligned)
                         match_result = matcher.match(emb)
-                        draw_unlocked_face(vis, face, match_result, False)
-            else:
-                # Not locked - try to lock or draw all faces
-                for face in faces:
-                    aligned, _ = align_face_5pt(frame, face.kps, out_size=(112, 112))
-                    emb = embedder.embed(aligned)
-                    match_result = matcher.match(emb)
-
-                    # Try to acquire lock
-                    if lock_manager.try_lock(face, match_result):
-                        # Lock acquired - will be drawn in next frame
-                        pass
-                    else:
-                        # Draw as unlocked
-                        is_target = (match_result.name == LOCK_TARGET_IDENTITY)
+                        is_target = (match_result.name == lock_manager.target_identity)
                         draw_unlocked_face(vis, face, match_result, is_target)
+            else:
+                # UNLOCKED STATE - Show all detected faces while searching
+                if len(faces) == 0:
+                    # No faces detected - show helpful message
+                    cv2.putText(
+                        vis,
+                        f"Searching for {lock_manager.target_identity}... (No faces detected)",
+                        (10, vis.shape[0] - 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 165, 255),
+                        2
+                    )
+                else:
+                    # Faces detected - recognize and display all, try to lock on target
+                    for face in faces:
+                        aligned, _ = align_face_5pt(frame, face.kps, out_size=(112, 112))
+                        emb = embedder.embed(aligned)
+                        match_result = matcher.match(emb)
+
+                        # Try to acquire lock on target identity
+                        if lock_manager.try_lock(face, match_result):
+                            # Lock acquired - will be drawn properly in next frame
+                            pass
+                        else:
+                            # Draw as unlocked (highlight target with green, others with yellow/red)
+                            is_target = (match_result.name == lock_manager.target_identity)
+                            draw_unlocked_face(vis, face, match_result, is_target)
 
             # Calculate FPS
             frames += 1

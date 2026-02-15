@@ -318,7 +318,7 @@ class Haar5ptDetector:
 # Demo
 # -------------------------
 def main():
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1)
     det = Haar5ptDetector(
         min_size=(70, 70),
         smooth_alpha=0.80,
