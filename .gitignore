@@ -28,7 +28,6 @@ ENV/
 env/
 
 # IDE
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -66,3 +65,5 @@ genderage.onnx
 
 # Logs
 *.log
+config.bat
+node_modules
