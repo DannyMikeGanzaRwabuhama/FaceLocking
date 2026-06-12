@@ -21,7 +21,7 @@ A CPU-friendly face recognition system using ArcFace embeddings, Haar cascade de
 ## Project Structure
 
 ```
-face-recognition-5pt/
+FaceLocking/
 ├── data/
 │   ├── enroll/          # Aligned face crops (generated)
 │   ├── db/              # Recognition database (generated)
@@ -592,6 +592,69 @@ python -m src.face_locking
 ---
 
 ## How It Works
+
+### System Architecture Flowchart
+
+```text
+=================================================
+          STAGE 1: RECOGNIZE (VISION)
+=================================================
+                 [ CAMERA INPUT ]
+                 (Capture Frame)
+                        |
+                 [ FACE DETECTION ]
+          (Haar Cascade / MediaPipe 5-pt)
+                        |
+           Faces Found? ----> NO ----> [ PUBLISH "SCAN" ]
+                        | 
+                       YES
+                        |
+               [ EXTRACT EMBEDDING ]
+                 (ArcFace Model)
+                        |
+                 [ COMPARE TO DB ]
+            (Check Similarity > 0.65)
+                        |
+             Match? ----> NO ----> [ IGNORE FACE ]
+                        | 
+                       YES
+                        |
+            [ ACQUIRE / MAINTAIN LOCK ]
+                 (Target Identified)
+
+=================================================
+             STAGE 2: TRACK (LOGIC)
+=================================================
+                        |
+               [ CALCULATE POSITION ]
+             (Find X-Coordinate Center 
+               of the Locked Face)
+                        |
+                [ CALCULATE ERROR ]
+          (Difference = Face X - Frame Center X)
+
+=================================================
+            STAGE 3: COMMAND (ACTION)
+=================================================
+                        |
+          Is abs(Difference) < Deadband (50px)?
+               /                     \
+             YES                     NO
+              |                       |
+      [ "CENTERED" ]             Difference < 0 ?
+                               /                  \
+                             YES                   NO
+                              |                     |
+                       [ "MOVE_LEFT" ]       [ "MOVE_RIGHT" ]
+                              |                     |
+                               \                   /
+                                 \               /
+                                   [ PUBLISH ]
+                            (Send JSON over Local MQTT)
+                                        |
+                                [ LOG TO CSV ]
+                           (Save state and timestamp)
+```
 
 ### Pipeline Architecture
 
